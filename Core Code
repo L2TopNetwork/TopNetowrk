@@ -1,0 +1,554 @@
+### Eclipse Workspace Patch 1.0
+#P L2J_Server_BETA
+Index: java/com/l2jserver/gameserver/voteEngine/VoteRead.java
+===================================================================
+--- java/com/l2jserver/gameserver/voteEngine/VoteRead.java	(revision 0)
++++ java/com/l2jserver/gameserver/voteEngine/VoteRead.java	(working copy)
+@@ -0,0 +1,67 @@
++package com.l2jserver.gameserver.voteEngine;
++
++import java.io.BufferedReader;
++import java.io.InputStreamReader;
++import java.net.URL;
++import java.util.logging.Logger;
++
++/**
++ * @author Reunion Team
++ * @author www.l2reunion.eu
++ */
++public class VoteRead
++{
++	private static final Logger _log = Logger.getLogger(VoteRead.class.getName());
++	// Enter your http://l2network.eu/ server id
++	// Example:
++	// If your server link is http://l2network.eu/?a=details&u=Anius then your id is Anius
++	private static String L2NetworkServerId = "Anius";
++	
++	public static long checkVotedIP(String IP)
++	{
++		long voteDate = 0;
++		if (checkIfVoted("Network", IP))
++		{
++			voteDate = System.currentTimeMillis() / 1000L;
++		}
++		return voteDate;
++	}
++	
++	private static boolean checkIfVoted(String Topsite, String IP)
++	{
++		String WordToCheck = "";
++		boolean voted = false;
++		URL url = null;
++		InputStreamReader isr = null;
++		try
++		{
++			switch (Topsite)
++			{
++				case "Network":
++					url = new URL("http://l2network.eu/index.php?a=in&u=" + L2NetworkServerId + "&ipc=" + IP);
++					WordToCheck = "0"; // This is the word that API returns if you haven't voted for Network
++					break;
++			}
++			
++			if (url != null)
++			{
++				isr = new InputStreamReader(url.openStream());
++				BufferedReader br = new BufferedReader(isr);
++				String strLine;
++				while ((strLine = br.readLine()) != null) // Read File Line By Line
++				{
++					if (!strLine.equals(WordToCheck))
++					{
++						voted = true;
++					}
++				}
++				isr.close(); // Close the input stream
++			}
++		}
++		catch (Exception e) // Catch exception if any
++		{
++			_log.warning("VoteRead: ERROR: " + e);
++		}
++		return voted;
++	}
++}
+\ No newline at end of file
+Index: java/com/l2jserver/gameserver/voteEngine/RewardVote.java
+===================================================================
+--- java/com/l2jserver/gameserver/voteEngine/RewardVote.java	(revision 0)
++++ java/com/l2jserver/gameserver/voteEngine/RewardVote.java	(working copy)
+@@ -0,0 +1,274 @@
++package com.l2jserver.gameserver.voteEngine;
++
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.logging.Logger;
++
++import com.l2jserver.L2DatabaseFactory;
++import com.l2jserver.gameserver.ThreadPoolManager;
++import com.l2jserver.gameserver.handler.IVoicedCommandHandler;
++import com.l2jserver.gameserver.model.actor.instance.L2PcInstance;
++
++/**
++ * @author Reunion Team
++ * @author www.l2reunion.eu
++ */
++public class RewardVote implements IVoicedCommandHandler
++{
++	private static enum ValueType
++	{
++		ACCOUNT_NAME,
++		IP_ADRESS,
++		HWID
++	}
++	
++	private static final Logger _log = Logger.getLogger(RewardVote.class.getName());
++	
++	private static final String[] COMMANDS_LIST = new String[]
++	{
++		"getreward"
++	};
++	
++	private static int WAIT_TIME = 5;
++	private static int MIN_LEVEL_TO_ALLOW_VOTE = 40;
++	private static final long INTERVAL = WAIT_TIME * 60 * 1000; // in minutes.
++	private static int rewardId = 57;
++	private static int rewardAmount = 1000;
++	
++	public List<L2PcInstance> _safePeople = new ArrayList<>();
++	
++	@Override
++	public boolean useVoicedCommand(String command, L2PcInstance activeChar, String params)
++	{
++		if (command.equalsIgnoreCase("getreward"))
++		{
++			if (_safePeople.contains(activeChar))
++			{
++				activeChar.sendMessage("You can use this command only once at " + WAIT_TIME + " minutes.");
++				return false;
++			}
++			
++			_safePeople.add(activeChar);
++			ThreadPoolManager.getInstance().scheduleGeneral(new PopSafePlayer(activeChar), INTERVAL);
++			
++			// getting IP of client, here we will have to check for HWID when we have LAMEGUARD
++			String IPClient = activeChar.getClient().getConnectionAddress().getHostAddress();
++			// String IPIntern= activeChar.getClient().getConnectionAddress().get
++			// sending IP to client for debug purpose
++			// ??
++			// Return 0 if he didnt voted. Date when he voted on website
++			long dateHeVotedOnWebsite = VoteRead.checkVotedIP(IPClient);
++			if (dateHeVotedOnWebsite > 0)
++			{
++				if (activeChar.getLevel() < MIN_LEVEL_TO_ALLOW_VOTE)
++				{
++					activeChar.sendMessage("You need to be at least " + String.valueOf(MIN_LEVEL_TO_ALLOW_VOTE) + " level in order to use this command.");
++					return false;
++				}
++				
++				String uniqueID = "";
++				// uniqueID = activeChar.getClient().getHWID();
++				// if (uniqueID == null)
++				// {
++				// uniqueID = "";
++				// }
++				
++				// Calculate if he can take reward
++				if (canTakeReward(dateHeVotedOnWebsite, IPClient, activeChar, uniqueID))
++				{
++					_log.info(activeChar.getName() + " got rewarded");
++					insertInDataBase(dateHeVotedOnWebsite, IPClient, activeChar, uniqueID);
++					
++					activeChar.getInventory().addItem("VoteReward", rewardId, rewardAmount, activeChar, true);
++					activeChar.sendMessage("Successfully rewarded.");
++				}
++			}
++			else
++			// He didnt voted.
++			{
++				activeChar.sendMessage("You didnt voted. Try again later!");
++				return false;
++			}
++			return true;
++		}
++		return false;
++	}
++	
++	/**
++	 * @param dateHeVotedOnWebsite
++	 * @param IPClient
++	 * @param activeChar
++	 * @param HwID
++	 **/
++	private static void insertInDataBase(long dateHeVotedOnWebsite, String IPClient, L2PcInstance activeChar, String HwID)
++	{
++		insertInDataBase(dateHeVotedOnWebsite, activeChar.getAccountName(), ValueType.ACCOUNT_NAME);
++		insertInDataBase(dateHeVotedOnWebsite, IPClient, ValueType.IP_ADRESS);
++		// insertInDataBase(dateHeVotedOnWebsite, HwID, ValueType.HWID);
++	}
++	
++	private static void insertInDataBase(long dateHeVotedOnWebsite, String value, ValueType type)
++	{
++		Connection con = null;
++		PreparedStatement statement = null;
++		ResultSet rset = null;
++		try
++		{
++			con = L2DatabaseFactory.getInstance().getConnection();
++			statement = con.prepareStatement("SELECT * FROM votes WHERE value=? AND value_type=?");
++			statement.setString(1, value);
++			statement.setInt(2, type.ordinal());
++			rset = statement.executeQuery();
++			
++			if (rset.next()) // He already exit in database because he voted before.
++			{
++				int count = rset.getInt("vote_count");
++				PreparedStatement statement2 = null;
++				try
++				{
++					statement2 = con.prepareStatement("UPDATE votes SET date_voted_website=?, date_take_reward_in_game=?, vote_count=? WHERE value=? AND value_type=?");
++					statement2.setLong(1, dateHeVotedOnWebsite);
++					statement2.setLong(2, (System.currentTimeMillis() / 1000L));
++					statement2.setInt(3, (count + 1));
++					statement2.setString(4, value);
++					statement2.setInt(5, type.ordinal());
++					statement2.executeUpdate();
++				}
++				catch (SQLException e)
++				{
++					_log.warning("RewardVote:insertInDataBase(long,String,ValueType): " + e);
++				}
++				finally
++				{
++					DbUtils.closeQuietly(statement2);
++				}
++			}
++			else
++			{
++				PreparedStatement statement2 = null;
++				try
++				{
++					statement2 = con.prepareStatement("INSERT INTO votes(value, value_type, date_voted_website, date_take_reward_in_game, vote_count) VALUES (?, ?, ?, ?, ?)");
++					statement2.setString(1, value);
++					statement2.setInt(2, type.ordinal());
++					statement2.setLong(3, dateHeVotedOnWebsite);
++					statement2.setLong(4, (System.currentTimeMillis() / 1000L));
++					statement2.setInt(5, 1);
++					statement2.execute();
++				}
++				catch (SQLException e)
++				{
++					_log.warning("RewardVote:insertInDataBase(long,String,ValueType): " + e);
++				}
++				finally
++				{
++					DbUtils.closeQuietly(statement2);
++				}
++			}
++		}
++		catch (SQLException e)
++		{
++			_log.warning("RewardVote:insertInDataBase(long,String,ValueType): " + e);
++		}
++		finally
++		{
++			DbUtils.closeQuietly(con, statement, rset);
++		}
++	}
++	
++	private static boolean canTakeReward(long dateHeVotedOnWebsite, String IPClient, L2PcInstance activeChar, String HwID)
++	{
++		int whenCanVote = canTakeReward(dateHeVotedOnWebsite, activeChar.getAccountName(), ValueType.ACCOUNT_NAME);
++		int whenCanVoteIP = canTakeReward(dateHeVotedOnWebsite, IPClient, ValueType.IP_ADRESS);
++		int whenCanVoteHWID = canTakeReward(dateHeVotedOnWebsite, HwID, ValueType.HWID);
++		
++		whenCanVote = Math.max(whenCanVote, Math.max(whenCanVoteIP, whenCanVoteHWID));
++		
++		if (whenCanVote > 0)
++		{
++			if (whenCanVote > 60)
++			{
++				activeChar.sendMessage("You can vote only once at 12 hours and 5 minutes. You still have to wait " + (whenCanVote / 60) + " hours " + (whenCanVote % 60) + " minutes.");
++			}
++			else
++			{
++				activeChar.sendMessage("You can vote only once at 12 hours and 5 minutes. You still have to wait " + whenCanVote + " minutes.");
++			}
++			return false;
++		}
++		return true;
++	}
++	
++	private static int canTakeReward(long dateHeVotedOnWebsite, String value, ValueType type)
++	{
++		int dateLastVote = 0; // Date When he last voted on server
++		int whenCanVote = 0; // The number of minutes when he can vote
++		
++		Connection con = null;
++		PreparedStatement statement = null;
++		ResultSet rset = null;
++		try
++		{
++			con = L2DatabaseFactory.getInstance().getConnection();
++			statement = con.prepareStatement("SELECT date_take_reward_in_game FROM votes WHERE value=? AND value_type=?");
++			statement.setString(1, value);
++			statement.setInt(2, type.ordinal());
++			rset = statement.executeQuery();
++			
++			if (rset.next())
++			{
++				dateLastVote = rset.getInt("date_take_reward_in_game");
++			}
++		}
++		catch (SQLException e)
++		{
++			_log.warning("RewardVote:canTakeReward(long,String,String): " + e);
++		}
++		finally
++		{
++			DbUtils.closeQuietly(con, statement, rset);
++		}
++		
++		// The number of minutes when he can vote
++		if (dateLastVote == 0)
++		{
++			whenCanVote = (int) ((dateHeVotedOnWebsite - (System.currentTimeMillis() / 1000L)) / 60);
++		}
++		else
++		{
++			whenCanVote = (int) (((dateLastVote + (12 * 60 * 60) + 300) - (System.currentTimeMillis() / 1000L)) / 60);
++		}
++		
++		return whenCanVote;
++	}
++	
++	// this is the class to remove safe players to be reported again after the given time
++	private class PopSafePlayer implements Runnable
++	{
++		private final L2PcInstance _safeplayer;
++		
++		public PopSafePlayer(L2PcInstance safeplayer)
++		{
++			_safeplayer = safeplayer;
++		}
++		
++		@Override
++		public void run()
++		{
++			if (_safePeople.contains(_safeplayer))
++			{
++				_safePeople.remove(_safeplayer);
++			}
++		}
++	}
++	
++	@Override
++	public String[] getVoicedCommandList()
++	{
++		return COMMANDS_LIST;
++	}
++}
+\ No newline at end of file
+Index: java/com/l2jserver/gameserver/handler/VoicedCommandHandler.java
+===================================================================
+--- java/com/l2jserver/gameserver/handler/VoicedCommandHandler.java	(revision 6670)
++++ java/com/l2jserver/gameserver/handler/VoicedCommandHandler.java	(working copy)
+@@ -21,6 +21,8 @@
+ import java.util.HashMap;
+ import java.util.Map;
+ 
++import com.l2jserver.gameserver.voteEngine.RewardVote;
++
+ /**
+  * @author UnAfraid
+  */
+@@ -31,6 +33,8 @@
+ 	protected VoicedCommandHandler()
+ 	{
+ 		_datatable = new HashMap<>();
++		
++		registerHandler(new RewardVote());
+ 	}
+ 	
+ 	@Override
+Index: java/com/l2jserver/gameserver/voteEngine/DbUtils.java
+===================================================================
+--- java/com/l2jserver/gameserver/voteEngine/DbUtils.java	(revision 0)
++++ java/com/l2jserver/gameserver/voteEngine/DbUtils.java	(working copy)
+@@ -0,0 +1,172 @@
++package com.l2jserver.gameserver.voteEngine;
++
++import java.sql.Connection;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.sql.Statement;
++
++/**
++ * @author Reunion Team
++ * @author www.l2reunion.eu
++ */
++public class DbUtils
++{
++	/**
++	 * Close a <code>Connection</code>, avoid closing if null.
++	 * @param conn Connection to close.
++	 * @throws SQLException if a database access error occurs
++	 */
++	public static void close(Connection conn) throws SQLException
++	{
++		if (conn != null)
++		{
++			conn.close();
++		}
++	}
++	
++	/**
++	 * Close a <code>ResultSet</code>, avoid closing if null.
++	 * @param rs ResultSet to close.
++	 * @throws SQLException if a database access error occurs
++	 */
++	public static void close(ResultSet rs) throws SQLException
++	{
++		if (rs != null)
++		{
++			rs.close();
++		}
++	}
++	
++	/**
++	 * Close a <code>Statement</code>, avoid closing if null.
++	 * @param stmt Statement to close.
++	 * @throws SQLException if a database access error occurs
++	 */
++	public static void close(Statement stmt) throws SQLException
++	{
++		if (stmt != null)
++		{
++			stmt.close();
++		}
++	}
++	
++	/**
++	 * Close a <code>Statement</code> and <code>ResultSet</code>, avoid closing if null.
++	 * @param stmt Statement to close.
++	 * @param rs ResultSet to close.
++	 * @throws SQLException if a database access error occurs
++	 */
++	public static void close(Statement stmt, ResultSet rs) throws SQLException
++	{
++		close(stmt);
++		close(rs);
++	}
++	
++	/**
++	 * Close a <code>Connection</code>, avoid closing if null and hide any SQLExceptions that occur.
++	 * @param conn Connection to close.
++	 */
++	public static void closeQuietly(Connection conn)
++	{
++		try
++		{
++			close(conn);
++		}
++		catch (SQLException e)
++		{
++			// quiet
++		}
++	}
++	
++	/**
++	 * Close a <code>Connection</code> and <code>Statement</code>. Avoid closing if null and hide any SQLExceptions that occur.
++	 * @param conn Connection to close.
++	 * @param stmt Statement to close.
++	 */
++	public static void closeQuietly(Connection conn, Statement stmt)
++	{
++		try
++		{
++			closeQuietly(stmt);
++		}
++		finally
++		{
++			closeQuietly(conn);
++		}
++	}
++	
++	/**
++	 * Close a <code>Statement</code> and <code>ResultSet</code>. Avoid closing if null and hide any SQLExceptions that occur.
++	 * @param stmt Statement to close.
++	 * @param rs ResultSet to close.
++	 */
++	public static void closeQuietly(Statement stmt, ResultSet rs)
++	{
++		try
++		{
++			closeQuietly(stmt);
++		}
++		finally
++		{
++			closeQuietly(rs);
++		}
++	}
++	
++	/**
++	 * Close a <code>Connection</code>, <code>Statement</code> and <code>ResultSet</code>. Avoid closing if null and hide any SQLExceptions that occur.
++	 * @param conn Connection to close.
++	 * @param stmt Statement to close.
++	 * @param rs ResultSet to close.
++	 */
++	public static void closeQuietly(Connection conn, Statement stmt, ResultSet rs)
++	{
++		
++		try
++		{
++			closeQuietly(rs);
++		}
++		finally
++		{
++			try
++			{
++				closeQuietly(stmt);
++			}
++			finally
++			{
++				closeQuietly(conn);
++			}
++		}
++	}
++	
++	/**
++	 * Close a <code>ResultSet</code>, avoid closing if null and hide any SQLExceptions that occur.
++	 * @param rs ResultSet to close.
++	 */
++	public static void closeQuietly(ResultSet rs)
++	{
++		try
++		{
++			close(rs);
++		}
++		catch (SQLException e)
++		{
++			// quiet
++		}
++	}
++	
++	/**
++	 * Close a <code>Statement</code>, avoid closing if null and hide any SQLExceptions that occur.
++	 * @param stmt Statement to close.
++	 */
++	public static void closeQuietly(Statement stmt)
++	{
++		try
++		{
++			close(stmt);
++		}
++		catch (SQLException e)
++		{
++			// quiet 35214
++		}
++	}
++}
