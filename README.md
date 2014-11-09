@@ -1,4 +1,4 @@
-L2TopNetowrk.com
+L2TopNetwork.com
 ==========
 
 L2Java vote reward system with command .vote
